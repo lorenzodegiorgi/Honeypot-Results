@@ -24,7 +24,7 @@ Contents</h2></summary>
 ## About The Project
 
 Artifacts and configurations in this repo comes from an honeypot that I 
-made up. Details about the honeypot can be found here:\\
+made up. Details about the honeypot can be found [here](https://lorenzodegiorgi.github.io/2024/01/09/Wazuh.html) \\
 The folders contains:
 - agent_log: logs from webserver (access.log), from SSH honeypot (cowrie_log.zip) and from Suricata (eve.json).
 - configurations: configuration of Wazuh Agent (ossec.conf) and cowrie 
