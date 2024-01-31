@@ -1,13 +1,6 @@
 <!-- PROJECT LOGO -->
 <br />
-
-<<<<<<< HEAD
-  <h3 align="center">Honeypot ResultsS</h3>
-=======
   <h3 align="center">Honeypot Results</h3>
->>>>>>> 2b83766 (add file)
-
-
 </p>
 
 
